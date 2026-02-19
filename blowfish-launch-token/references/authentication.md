@@ -10,12 +10,12 @@ Agent                              API
   |-- POST /api/auth/challenge ---->|  (send wallet address)
   |<-------- { nonce } -------------|  (5-min expiry)
   |                                 |
-  |  sign(nonce)                     |
+  |  sign(nonce)                    |
   |                                 |
   |-- POST /api/auth/verify ------->|  (wallet + nonce + sig)
-  |<-------- { token } -------------|  (15-min JWT)
+  |<-------- { token, expiresIn } --|  (15-min JWT)
   |                                 |
-  |-- Any API call --------------->|
+  |-- Any API call ---------------->|
   |   Authorization: Bearer <jwt>   |
 ```
 
@@ -91,15 +91,47 @@ TOKEN=$(curl -s -X POST "$BASE/api/auth/verify" \
 echo "$TOKEN"
 ```
 
+## JWT Details
+
+| Property | Value |
+|----------|-------|
+| Algorithm | HS256 |
+| Expiry | 15 minutes (`expiresIn: 900`) |
+| `sub` claim | Wallet address |
+| `iss` claim | JWT issuer |
+| `aud` claim | JWT audience |
+| Signing secret | Per-session (derived from wallet signature) |
+
+The JWT does **not** contain a `scope` claim. Authorization is determined by wallet ownership — the authenticated wallet must match the agent that launched a given token.
+
 ## Token Lifecycle
 
 | Property | Value |
 |----------|-------|
 | Challenge nonce TTL | 5 minutes |
+| Active nonces per wallet | 1 (new challenge overwrites previous) |
 | JWT TTL | 15 minutes |
 | Signature algorithm | ed25519 (detached) |
 | Signature encoding | base58 |
 | Header format | `Authorization: Bearer <jwt>` |
+
+## Error Handling
+
+| Error | Cause | Resolution |
+|-------|-------|------------|
+| `Invalid wallet address format` | Malformed base58 address | Check wallet address encoding |
+| `Invalid or expired nonce` | Nonce TTL exceeded (5 min) or already consumed | Request a new challenge |
+| `Invalid signature` | Signature verification failed | Ensure you're signing the raw nonce (not a prefixed message) with the correct private key |
+| `Session expired or invalid` | Per-session secret expired in cache | Re-authenticate from Step 1 |
+| `Invalid or expired token` | JWT expired (15 min) | Re-authenticate to get a new JWT |
+
+## Security Notes
+
+- Nonces are **single-use** — consumed atomically on verification
+- Each wallet can only have **one active nonce** at a time; requesting a new challenge overwrites any previous nonce
+- JWTs are short-lived (15 min) to limit exposure
+- JWT signing uses a **per-session secret** stored in Redis with the same TTL as the token
+- Always store private keys securely; never transmit them over the network
 
 ## Re-authentication
 

@@ -50,10 +50,10 @@ curl -s -X POST https://api-blowfish.neuko.ai/api/auth/verify \
 
 **Response:**
 ```json
-{"token": "<jwt>"}
+{"token": "<jwt>", "expiresIn": 900}
 ```
 
-The JWT is valid for **15 minutes**. Use it in all subsequent requests:
+The JWT is valid for **15 minutes** (900 seconds). Use it in all subsequent requests:
 
 ```
 Authorization: Bearer <jwt>
@@ -80,7 +80,7 @@ curl -s -X POST https://api-blowfish.neuko.ai/api/v1/tokens/launch \
 | Field | Type | Required | Constraints |
 |-------|------|----------|-------------|
 | `name` | string | yes | 1–255 characters |
-| `ticker` | string | yes | 2–10 chars, uppercase alphanumeric only |
+| `ticker` | string | yes | 2–10 chars, `^[A-Z0-9]+$` |
 | `description` | string | no | max 1000 characters |
 | `imageUrl` | string | no | valid URL, max 255 characters |
 
@@ -160,28 +160,34 @@ curl -s https://api-blowfish.neuko.ai/api/v1/tokens/claims \
 **Response:**
 ```json
 {
-  "claims": [
+  "success": true,
+  "tokens": [
     {
-      "tokenMint": "string",
       "poolAddress": "string",
-      "ticker": "string",
-      "dbcClaimableFees": 0.5,
+      "tokenMint": "string",
+      "ticker": "MCT",
+      "tokenName": "My Cool Token",
+      "createdAt": "2024-01-15T12:00:00.000Z",
+      "dbcClaimableFees": 0.25,
       "dbcTotalFees": 1.0,
-      "dbcClaimedFees": 0.5,
-      "lpClaimableFees": 0.25,
-      "lpTotalFees": 0.5,
-      "lpClaimedFees": 0.25,
-      "isMigrated": false
+      "dbcClaimedFees": 0.75,
+      "lpClaimableFees": 0.1,
+      "lpTotalFees": 0.3,
+      "lpClaimedFees": 0,
+      "isMigrated": true,
+      "feeError": null
     }
   ]
 }
 ```
 
+The `feeError` field is non-null when on-chain fee lookup failed for a specific token. Other tokens in the response are unaffected.
+
 ## Claim Fees
 
-Two-step process — get the unsigned transaction, sign it locally, then submit.
+Two-step process — get unsigned transactions, sign them locally, then submit each back.
 
-### Step 1: Get Unsigned Transaction
+### Step 1: Get Unsigned Transactions
 
 ```bash
 curl -s -X POST https://api-blowfish.neuko.ai/api/v1/tokens/claims/<mintAddress> \
@@ -192,13 +198,26 @@ curl -s -X POST https://api-blowfish.neuko.ai/api/v1/tokens/claims/<mintAddress>
 ```json
 {
   "success": true,
-  "transaction": "<base64-encoded-unsigned-transaction>"
+  "dbcTransaction": {
+    "success": true,
+    "transaction": "base64-encoded-unsigned-transaction",
+    "claimedQuoteFeeSOL": 0.5,
+    "feeType": "dbc"
+  },
+  "lpTransaction": {
+    "success": true,
+    "transaction": "base64-encoded-unsigned-transaction",
+    "feeType": "lp"
+  },
+  "transactionExpirySeconds": 90
 }
 ```
 
+Either `dbcTransaction` or `lpTransaction` may be absent if that fee type is unavailable. Transactions expire in ~60-90 seconds — sign and submit immediately.
+
 ### Step 2: Submit Signed Transaction
 
-Sign the transaction with the wallet keypair, then submit:
+Sign each transaction with the wallet keypair, then submit:
 
 ```bash
 curl -s -X POST https://api-blowfish.neuko.ai/api/v1/tokens/claims/<mintAddress> \
@@ -211,10 +230,12 @@ curl -s -X POST https://api-blowfish.neuko.ai/api/v1/tokens/claims/<mintAddress>
 ```json
 {
   "success": true,
-  "transactionHash": "string",
-  "claimedSOL": 0.75
+  "transactionHash": "tx-signature",
+  "message": "Transaction submitted successfully"
 }
 ```
+
+If you see a "Blockhash not found" error, request new unsigned transactions and try again.
 
 See [references/fee-claims.md](references/fee-claims.md) for detailed walkthrough.
 
@@ -234,12 +255,19 @@ No authentication required.
 
 All errors return: `{"error": "Human-readable message"}`
 
+Validation errors also include a `details` array:
+```json
+{"error": "Validation failed", "details": [{"field": "ticker", "message": "Must be 2-10 uppercase alphanumeric characters"}]}
+```
+
 | Status | Scenario | Action |
 |--------|----------|--------|
-| 400 | Invalid request body | Validate fields against constraints above |
+| 400 | Invalid request body | Check `details` array for per-field errors |
 | 401 | Missing or expired JWT | Re-authenticate for a fresh token |
+| 403 | Wallet address mismatch | Authenticate with the wallet that launched the token |
 | 404 | Event or token not found | Verify the eventId or mintAddress |
 | 409 | Duplicate ticker | Choose a different ticker |
-| 429 | Rate limited | Wait until UTC midnight to retry |
+
+**Note:** Rate limiting is not enforced via HTTP status. The API accepts the launch (200) and the background worker sets the status to `rate_limited` — check via the status polling endpoint.
 
 See [references/error-handling.md](references/error-handling.md) for full error catalog.

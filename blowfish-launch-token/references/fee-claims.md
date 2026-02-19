@@ -4,29 +4,49 @@ Detailed guide for viewing and claiming accumulated trading fees from launched t
 
 ## Fee Types
 
-Each token accumulates two types of fees:
+Blowfish tokens go through two phases, each generating a different fee type:
 
-| Fee Type | Field Prefix | Description |
-|----------|-------------|-------------|
-| DBC (Dynamic Bonding Curve) | `dbc` | Fees from the bonding curve trading |
-| LP (Liquidity Pool) | `lp` | Fees from liquidity pool activity |
+| Phase | Fee Type | Field Prefix | Description |
+|-------|----------|-------------|-------------|
+| Pre-migration | DBC (Dynamic Bonding Curve) | `dbc` | Trading fees from the bonding curve |
+| Post-migration | LP (Liquidity Pool) | `lp` | LP fees from the DAMM V2 pool after graduation |
 
-## Fee Fields
+A pool **migrates** (graduates) from the DBC bonding curve to DAMM V2 once it reaches its liquidity threshold. After migration, new fees accumulate as LP fees.
+
+## Fee Response Schema
+
+The `GET /api/v1/tokens/claims` endpoint returns:
 
 ```json
 {
-  "tokenMint": "mint-address",
-  "poolAddress": "pool-address",
-  "ticker": "MYTKN",
-  "dbcClaimableFees": 0.5,    // Available to claim now
-  "dbcTotalFees": 1.0,        // All-time total
-  "dbcClaimedFees": 0.5,      // Already claimed
-  "lpClaimableFees": 0.25,
-  "lpTotalFees": 0.5,
-  "lpClaimedFees": 0.25,
-  "isMigrated": false          // Whether the pool has migrated
+  "success": true,
+  "tokens": [
+    {
+      "poolAddress": "PoolAddr123...",
+      "tokenMint": "MintAddr456...",
+      "ticker": "MCT",
+      "tokenName": "My Cool Token",
+      "createdAt": "2024-01-15T12:00:00.000Z",
+      "dbcClaimableFees": 0.25,
+      "dbcTotalFees": 1.0,
+      "dbcClaimedFees": 0.75,
+      "lpClaimableFees": 0.1,
+      "lpTotalFees": 0.3,
+      "lpClaimedFees": 0,
+      "isMigrated": true,
+      "feeError": null
+    }
+  ]
 }
 ```
+
+| Field | Description |
+|-------|-------------|
+| `tokenName` | Token display name |
+| `createdAt` | ISO-8601 deploy timestamp |
+| `isMigrated` | Whether the pool has graduated to DAMM V2 |
+| `feeError` | Non-null when on-chain fee lookup failed for this token |
+| `lpClaimedFees` | Currently always `0` — full tracking coming soon |
 
 ## Claim Workflow
 
@@ -34,32 +54,55 @@ Each token accumulates two types of fees:
 
 ```bash
 curl -s https://api-blowfish.neuko.ai/api/v1/tokens/claims \
-  -H "Authorization: Bearer <jwt>" | jq '.claims[] | select(.dbcClaimableFees > 0 or .lpClaimableFees > 0)'
+  -H "Authorization: Bearer <jwt>" | jq '.tokens[] | select(.dbcClaimableFees > 0 or .lpClaimableFees > 0)'
 ```
 
-### 2. Request Unsigned Transaction
+### 2. Request Unsigned Transactions
 
 ```bash
 curl -s -X POST https://api-blowfish.neuko.ai/api/v1/tokens/claims/<mintAddress> \
   -H "Authorization: Bearer <jwt>"
 ```
 
-The response contains a base64-encoded Solana transaction that needs to be signed.
+The response contains up to **two** base64-encoded Solana transactions — one for DBC fees and one for LP fees:
 
-### 3. Sign the Transaction
+```json
+{
+  "success": true,
+  "dbcTransaction": {
+    "success": true,
+    "transaction": "base64-encoded-unsigned-transaction",
+    "claimedQuoteFeeSOL": 0.5,
+    "feeType": "dbc"
+  },
+  "lpTransaction": {
+    "success": true,
+    "transaction": "base64-encoded-unsigned-transaction",
+    "feeType": "lp"
+  },
+  "transactionExpirySeconds": 90
+}
+```
+
+Either `dbcTransaction` or `lpTransaction` may be absent if that fee type is unavailable (e.g., pool hasn't migrated yet).
+
+### 3. Sign Each Transaction
 
 ```typescript
-import { Transaction } from "@solana/web3.js";
+import { Keypair, Transaction } from "@solana/web3.js";
 
-// Decode the unsigned transaction
-const txBuffer = Buffer.from(unsignedTx, "base64");
-const transaction = Transaction.from(txBuffer);
+// Sign each available transaction (dbcTransaction and/or lpTransaction)
+for (const txKey of ["dbcTransaction", "lpTransaction"] as const) {
+  const txData = data[txKey];
+  if (!txData?.success || !txData?.transaction) continue;
 
-// Sign with your keypair
-transaction.sign(keypair);
+  const txBuffer = Buffer.from(txData.transaction, "base64");
+  const tx = Transaction.from(txBuffer);
+  tx.sign(keypair);
+  const signedTxBase64 = tx.serialize().toString("base64");
 
-// Re-encode as base64
-const signedTx = transaction.serialize().toString("base64");
+  // Submit immediately — transactions expire in ~60-90 seconds
+}
 ```
 
 ### 4. Submit Signed Transaction
@@ -73,13 +116,13 @@ curl -s -X POST https://api-blowfish.neuko.ai/api/v1/tokens/claims/<mintAddress>
 
 ### 5. Verify Result
 
-A successful claim returns:
+A successful submission returns:
 
 ```json
 {
   "success": true,
-  "transactionHash": "tx-signature-on-solana",
-  "claimedSOL": 0.75
+  "transactionHash": "5UfD...tx-signature",
+  "message": "Transaction submitted successfully"
 }
 ```
 
@@ -87,9 +130,17 @@ The `transactionHash` can be verified on a Solana explorer.
 
 ## Error Scenarios
 
-| Error | Cause | Resolution |
-|-------|-------|------------|
-| 404 | Token not found | Verify mintAddress matches a deployed token |
-| 401 | Expired JWT | Re-authenticate |
-| 400 | Invalid signed transaction | Ensure correct keypair was used to sign |
-| No claimable fees | Fees are zero | Wait for trading activity to generate fees |
+| Error | Status | Cause | Resolution |
+|-------|--------|-------|------------|
+| `Token not found for this agent` | 404 | Token not launched by this agent | Verify mintAddress matches a token you launched |
+| `Wallet address does not match agent wallet` | 403 | JWT wallet mismatch | Authenticate with the wallet that launched the token |
+| `Failed to create claim transactions` | 400 | On-chain transaction build failed | Check that the token has claimable fees |
+| `Failed to submit signed transaction` | 400 | Submission failed | Verify signature; transaction may have expired |
+| `Invalid or expired token` | 401 | Expired JWT | Re-authenticate |
+
+## Notes
+
+- DBC and LP fees are returned as **separate unsigned transactions** per token. Iterate over both.
+- Transactions expire in ~60-90 seconds. If you see a "Blockhash not found" error, request new unsigned transactions and try again.
+- Fee amounts are in SOL.
+- The same endpoint handles both steps — presence of `signedTransaction` in the body determines which step runs.
