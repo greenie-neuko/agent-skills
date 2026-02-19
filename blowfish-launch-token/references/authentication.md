@@ -10,8 +10,7 @@ Agent                              API
   |-- POST /api/auth/challenge ---->|  (send wallet address)
   |<-------- { nonce } -------------|  (5-min expiry)
   |                                 |
-  |  sign("Sign this message to     |
-  |   authenticate: <nonce>")       |
+  |  sign(nonce)                     |
   |                                 |
   |-- POST /api/auth/verify ------->|  (wallet + nonce + sig)
   |<-------- { token } -------------|  (15-min JWT)
@@ -40,10 +39,9 @@ async function authenticate(keypair: Keypair): Promise<string> {
   });
   const { nonce } = await challengeRes.json();
 
-  // Step 2: Sign the challenge message
-  const message = `Sign this message to authenticate: ${nonce}`;
-  const messageBytes = new TextEncoder().encode(message);
-  const signature = nacl.sign.detached(messageBytes, keypair.secretKey);
+  // Step 2: Sign the raw nonce
+  const nonceBytes = new TextEncoder().encode(nonce);
+  const signature = nacl.sign.detached(nonceBytes, keypair.secretKey);
   const signatureBase58 = bs58.encode(signature);
 
   // Step 3: Verify and receive JWT
@@ -80,9 +78,8 @@ NONCE=$(curl -s -X POST "$BASE/api/auth/challenge" \
   -H "Content-Type: application/json" \
   -d "{\"wallet\": \"$WALLET\"}" | jq -r '.nonce')
 
-# Step 2: Sign message
-MESSAGE="Sign this message to authenticate: $NONCE"
-# Sign using solana CLI or equivalent ed25519 tool
+# Step 2: Sign the raw nonce
+# Sign $NONCE using solana CLI or equivalent ed25519 tool
 # The signature must be base58-encoded
 
 # Step 3: Verify

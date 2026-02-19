@@ -38,13 +38,7 @@ The nonce expires after **5 minutes**.
 
 ### Step 2: Sign the Challenge
 
-Sign the following message with the wallet's ed25519 keypair:
-
-```
-Sign this message to authenticate: <nonce>
-```
-
-Encode the signature as **base58**.
+Sign the **raw nonce** with the wallet's ed25519 keypair. Encode the signature as **base58**.
 
 ### Step 3: Verify and Get JWT
 
